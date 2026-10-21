@@ -1,6 +1,6 @@
 # ySBGN 1.2.0
 
-Ready-to-run jars, built from branch `java-modern` (commit 2ca4a9e). Java 11 or newer
+Ready-to-run jars, built from branch `java-modern` (commit f61f9bc). Java 11 or newer
 is needed (https://adoptium.net); JavaFX is included.
 
 | Your computer | File |
