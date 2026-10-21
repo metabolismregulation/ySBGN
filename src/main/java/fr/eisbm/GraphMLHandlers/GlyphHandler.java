@@ -8,6 +8,7 @@ import java.util.Map.Entry;
 import java.util.Set;
 
 import org.jgrapht.alg.util.Pair;
+import org.sbgn.bindings.Arc;
 import org.sbgn.bindings.Bbox;
 import org.sbgn.bindings.Glyph;
 import org.sbgn.bindings.Glyph.Clone;
@@ -397,7 +398,7 @@ public class GlyphHandler {
 
 			// parse data information on notes, annotation, orientation, clone etc.
 			NodeList nlDataList = eElement.getElementsByTagName(ConverterDefines.DATA_TAG);
-			Element eltAnnotation = parseAnnotation(doc, modelAttributes, _glyph, nlDataList);
+			Element eltAnnotation = parseAnnotation(doc, modelAttributes, _glyph, nlDataList, eElement);
 
 			if (null != eltAnnotation) {
 				Extension _extension = new Extension();
@@ -406,6 +407,63 @@ public class GlyphHandler {
 			}
 		}
 		return _glyph;
+	}
+
+	/**
+	 * A process or logic gate drawn outside every compartment is given the
+	 * smallest compartment its centre lies in, else the compartment of its first
+	 * neighbour, as Newt places it.
+	 */
+	public void setProcessCompartments(Map map) {
+		List<Glyph> compartments = new ArrayList<Glyph>();
+		for (Glyph g : map.getGlyph()) {
+			if (ConverterDefines.SBGN_COMPARTMENT.equals(g.getClazz())) {
+				compartments.add(g);
+			}
+		}
+		if (compartments.isEmpty()) {
+			return;
+		}
+		for (Glyph g : map.getGlyph()) {
+			if ((Utils.isProcessType(g) || Utils.isOperatorType(g)) && g.getCompartmentRef() == null) {
+				float x = g.getBbox().getX() + g.getBbox().getW() / 2;
+				float y = g.getBbox().getY() + g.getBbox().getH() / 2;
+				Glyph smallest = null;
+				for (Glyph c : compartments) {
+					Bbox b = c.getBbox();
+					if (b.getX() <= x && x <= b.getX() + b.getW() && b.getY() <= y && y <= b.getY() + b.getH()
+							&& (smallest == null || b.getW() * b.getH() < smallest.getBbox().getW()
+									* smallest.getBbox().getH())) {
+						smallest = c;
+					}
+				}
+				if (smallest == null) {
+					smallest = neighbourCompartment(g, map);
+				}
+				if (smallest != null) {
+					g.setCompartmentRef(smallest);
+				}
+			}
+		}
+	}
+
+	private Glyph neighbourCompartment(Glyph g, Map map) {
+		for (Arc arc : map.getArc()) {
+			Object other = null;
+			if (owner(arc.getSource(), g)) {
+				other = arc.getTarget();
+			} else if (owner(arc.getTarget(), g)) {
+				other = arc.getSource();
+			}
+			if (other instanceof Glyph && ((Glyph) other).getCompartmentRef() instanceof Glyph) {
+				return (Glyph) ((Glyph) other).getCompartmentRef();
+			}
+		}
+		return null;
+	}
+
+	private boolean owner(Object end, Glyph g) {
+		return end == g || (end instanceof Port && g.getPort().contains(end));
 	}
 
 	/**
@@ -462,7 +520,67 @@ public class GlyphHandler {
 		}
 	}
 
-	private Element parseAnnotation(Document doc, ModelAttributes modelAttributes, Glyph _glyph, NodeList nlDataList) {
+	/**
+	 * Writes the identifiers kept as node properties as identifiers.org links, as
+	 * Newt reads them: bqbiol:is for one entity (a metabolite by its ChEBI ID, a
+	 * protein by HGNC symbol, HGNC and UniProt), bqbiol:hasVersion with the
+	 * members' links for a family (Member annotation).
+	 */
+	private boolean addIdentifiers(Document doc, Element rdfDescription, java.util.Map<String, String> identifiers) {
+		List<String> uris = new ArrayList<String>();
+		String szQualifier = "bqbiol:is";
+		if (identifiers.containsKey("Member annotation")) {
+			szQualifier = "bqbiol:hasVersion";
+			// [{"symbol": "MAP2K1", "props": [["HGNC", "HGNC:6840"], ["HGNC symbol", "MAP2K1"], ...]}, ...]
+			java.util.regex.Matcher member = java.util.regex.Pattern.compile("\\{[^{}]*\\}")
+					.matcher(identifiers.get("Member annotation"));
+			while (member.find()) {
+				java.util.Map<String, String> props = new HashMap<String, String>();
+				java.util.regex.Matcher prop = java.util.regex.Pattern
+						.compile("\\[\\s*\"([^\"]+)\"\\s*,\\s*\"([^\"]*)\"\\s*\\]").matcher(member.group());
+				while (prop.find()) {
+					props.put(prop.group(1), prop.group(2));
+				}
+				uris.addAll(identifierUris(props));
+			}
+		} else if (identifiers.containsKey("ChEBI") || identifiers.containsKey("HGNC symbol")) {
+			uris.addAll(identifierUris(identifiers));
+		}
+		if (uris.isEmpty()) {
+			return false;
+		}
+		Element eltQualifier = doc.createElementNS("http://biomodels.net/biology-qualifiers/", szQualifier);
+		Element eltRDFBag = doc.createElementNS("http://www.w3.org/1999/02/22-rdf-syntax-ns#", ConverterDefines.RDF_BAG_TAG);
+		eltQualifier.appendChild(eltRDFBag);
+		for (String uri : uris) {
+			Element eltRDFLi = doc.createElementNS("http://www.w3.org/1999/02/22-rdf-syntax-ns#", ConverterDefines.RDF_LI_TAG);
+			eltRDFLi.setAttributeNS("http://www.w3.org/1999/02/22-rdf-syntax-ns#", ConverterDefines.RDF_RESOURCE_TAG, uri);
+			eltRDFBag.appendChild(eltRDFLi);
+		}
+		rdfDescription.appendChild(eltQualifier);
+		return true;
+	}
+
+	private List<String> identifierUris(java.util.Map<String, String> props) {
+		List<String> uris = new ArrayList<String>();
+		if (props.containsKey("ChEBI")) {
+			uris.add("http://identifiers.org/CHEBI:" + props.get("ChEBI").replace("CHEBI:", ""));
+			return uris;
+		}
+		if (props.containsKey("HGNC symbol")) {
+			uris.add("http://identifiers.org/hgnc.symbol:" + props.get("HGNC symbol"));
+		}
+		if (props.containsKey("HGNC")) {
+			uris.add("http://identifiers.org/hgnc:" + props.get("HGNC").replace("HGNC:", ""));
+		}
+		if (props.containsKey("UniProt")) {
+			uris.add("http://identifiers.org/uniprot:" + props.get("UniProt"));
+		}
+		return uris;
+	}
+
+	private Element parseAnnotation(Document doc, ModelAttributes modelAttributes, Glyph _glyph, NodeList nlDataList,
+			Element eNode) {
 		Element eltAnnotation = null;
 		// TODO: to read the namespace from the file
 		Element rdfRDF = doc.createElementNS("http://www.w3.org/1999/02/22-rdf-syntax-ns#",
@@ -474,9 +592,30 @@ public class GlyphHandler {
 		// check if there is at least one field of the annotation; otherwise, no need to
 		// add an empty annotation
 		boolean bHasAnnotation = false;
+		java.util.Map<String, String> identifiers = new HashMap<String, String>();
 
 		for (int temp2 = 0; temp2 < nlDataList.getLength(); temp2++) {
 			Element _element = ((Element) (nlDataList.item(temp2)));
+			// the data of the nodes drawn inside a group (members of a complex) are theirs
+			if (isInNestedGraph(_element, eNode)) {
+				continue;
+			}
+
+			// identifiers kept as node properties: HGNC, HGNC symbol, UniProt, ChEBI, Member annotation
+			String szKey = _element.getAttribute(ConverterDefines.KEY_TAG);
+			if (!szKey.isEmpty() && !_element.getTextContent().trim().isEmpty()) {
+				if (szKey.equals(modelAttributes.szHgncTagId)) {
+					identifiers.put("HGNC", _element.getTextContent().trim());
+				} else if (szKey.equals(modelAttributes.szHgncSymbolTagId)) {
+					identifiers.put("HGNC symbol", _element.getTextContent().trim());
+				} else if (szKey.equals(modelAttributes.szUniProtTagId)) {
+					identifiers.put("UniProt", _element.getTextContent().trim());
+				} else if (szKey.equals(modelAttributes.szChebiTagId)) {
+					identifiers.put("ChEBI", _element.getTextContent().trim());
+				} else if (szKey.equals(modelAttributes.szMemberAnnotationTagId)) {
+					identifiers.put("Member annotation", _element.getTextContent().trim());
+				}
+			}
 
 			// parse notes information
 			if (_element.getAttribute(ConverterDefines.KEY_TAG).equals(modelAttributes.szNotesTagId)) {
@@ -658,6 +797,10 @@ public class GlyphHandler {
 					bHasAnnotation = true;
 				}
 			}
+		}
+
+		if (!Utils.isProcessType(_glyph) && addIdentifiers(doc, rdfDescription, identifiers)) {
+			bHasAnnotation = true;
 		}
 
 		if (true == bHasAnnotation) {
